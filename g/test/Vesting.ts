@@ -17,16 +17,16 @@ describe("Vesting", function () {
     const Vesting = await hre.ethers.getContractFactory("Vesting");
     vesting = await Vesting.deploy(await token.getAddress(), owner.address);
     
-    // Mint tokens for vesting contract
-    await token.mint(await vesting.getAddress(), hre.ethers.parseEther("1000000"));
+    // Mint tokens for OWNER (not vesting contract)
+    await token.mint(owner.address, hre.ethers.parseEther("1000000"));
+    
+    // Approve vesting contract to spend owner's tokens
+    await token.approve(await vesting.getAddress(), hre.ethers.parseEther("1000000"));
   });
 
   describe("Create Vesting", function () {
     it("Should create vesting with 25% immediate release", async function () {
       const amount = hre.ethers.parseEther("1000");
-      
-      // Approve vesting contract
-      await token.approve(await vesting.getAddress(), amount);
       
       await vesting.createVesting(buyer.address, amount);
       
@@ -37,7 +37,6 @@ describe("Vesting", function () {
 
     it("Should fail if already has vesting", async function () {
       const amount = hre.ethers.parseEther("1000");
-      await token.approve(await vesting.getAddress(), amount);
       await vesting.createVesting(buyer.address, amount);
       
       await expect(
@@ -49,7 +48,6 @@ describe("Vesting", function () {
   describe("Release", function () {
     it("Should release tokens after time passes", async function () {
       const amount = hre.ethers.parseEther("1000");
-      await token.approve(await vesting.getAddress(), amount);
       await vesting.createVesting(buyer.address, amount);
       
       // Advance time by 30 days

@@ -25,6 +25,10 @@ contract Airdrop is Ownable {
         emit MerkleRootUpdated(_merkleRoot);
     }
     
+    /**
+     * @dev المطالبة بالإيردروب
+     * ملاحظة: OpenZeppelin MerkleTree يستخدم keccak256 مزدوج
+     */
     function claim(
         uint256 amount,
         bytes32[] calldata merkleProof
@@ -32,7 +36,9 @@ contract Airdrop is Ownable {
         require(isActive, "Airdrop not active");
         require(!hasClaimed[msg.sender], "Already claimed");
         
-        bytes32 leaf = keccak256(abi.encodePacked(msg.sender, amount));
+        // طريقة OpenZeppelin القياسية (double hash)
+        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(msg.sender, amount))));
+        
         require(
             MerkleProof.verify(merkleProof, merkleRoot, leaf),
             "Invalid proof"
@@ -52,7 +58,7 @@ contract Airdrop is Ownable {
     ) external view returns (bool) {
         if (hasClaimed[user]) return false;
         
-        bytes32 leaf = keccak256(abi.encodePacked(user, amount));
+        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(user, amount))));
         return MerkleProof.verify(merkleProof, merkleRoot, leaf);
     }
     
