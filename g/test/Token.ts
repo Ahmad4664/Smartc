@@ -94,4 +94,53 @@ describe("Token", function () {
       expect(await token.totalSupply()).to.equal(500);
     });
   });
+
+// إضافة هذه الاختبارات
+describe("Security", function () {
+    it("Should fail mint to zero address", async function () {
+      await expect(
+        token.mint("0x0000000000000000000000000000000000000000", 1000)
+      ).to.be.revertedWith("Cannot mint to zero address");
+    });
+
+    it("Should fail mint zero amount", async function () {
+      await expect(
+        token.mint(addr1.address, 0)
+      ).to.be.revertedWith("Amount must be greater than 0");
+    });
+
+    it("Should fail batch mint with zero address", async function () {
+      await expect(
+        token.mintBatch(
+          [addr1.address, "0x0000000000000000000000000000000000000000"],
+          [1000, 1000]
+        )
+      ).to.be.revertedWith("Cannot mint to zero address");
+    });
+
+    it("Should fail batch mint with zero amount", async function () {
+      await expect(
+        token.mintBatch(
+          [addr1.address, addr2.address],
+          [1000, 0]
+        )
+      ).to.be.revertedWith("Amount must be greater than 0");
+    });
+
+    it("Should fail batch mint too large", async function () {
+      const recipients = Array(101).fill(addr1.address);
+      const amounts = Array(101).fill(1000);
+      
+      await expect(
+        token.mintBatch(recipients, amounts)
+      ).to.be.revertedWith("Batch too large");
+    });
+
+    it("Should fail burn zero amount", async function () {
+      await token.mint(addr1.address, 1000);
+      await expect(
+        token.connect(addr1).burn(0)
+      ).to.be.revertedWith("Amount must be greater than 0");
+    });
+  });
 });
