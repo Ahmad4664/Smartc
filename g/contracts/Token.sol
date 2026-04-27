@@ -1,4 +1,4 @@
-token_sol_v7 = '''// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -449,4 +449,4 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
     function hasDefaultAdminRole(address account) external view returns (bool) {
         return hasRole(DEFAULT_ADMIN_ROLE, account);
     }
-}'''
+}

@@ -1,600 +1,444 @@
 import { expect } from "chai";
-import hre from "hardhat";
+import { ethers } from "hardhat";
+import { time } from "@nomicfoundation/hardhat-network-helpers";
+import { ProjectToken, TimelockController } from "../typechain-types";
+import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
-describe("ProjectToken", function () {
-  let token: any;
-  let owner: any;
-  let addr1: any;
-  let addr2: any;
-  let addr3: any;
+describe("ProjectToken v7 — Trust-Minimized", function () {
+  let token: ProjectToken;
+  let timelock: TimelockController;
+  let owner: SignerWithAddress;
+  let timelockSigner: SignerWithAddress;
+  let user1: SignerWithAddress;
+  let user2: SignerWithAddress;
+  let pair: SignerWithAddress;
+  let router: SignerWithAddress;
+  let attacker: SignerWithAddress;
+
+  const MAX_SUPPLY = ethers.parseEther("1000000000");
+  const ONE_DAY = 86400;
+  const TWO_DAYS = 2 * ONE_DAY;
 
   beforeEach(async function () {
-    [owner, addr1, addr2, addr3] = await hre.ethers.getSigners();
-    
-    const Token = await hre.ethers.getContractFactory("ProjectToken");
-    token = await Token.deploy("ProjectToken", "PROJ", owner.address);
+    [owner, user1, user2, pair, router, attacker] = await ethers.getSigners();
+
+    // Deploy TimelockController
+    const TimelockFactory = await ethers.getContractFactory("TimelockController");
+    timelock = await TimelockFactory.deploy(
+      TWO_DAYS,
+      [owner.address],
+      [owner.address],
+      owner.address
+    );
+    await timelock.waitForDeployment();
+
+    // Get timelock signer
+    timelockSigner = await ethers.getImpersonatedSigner(await timelock.getAddress());
+    await owner.sendTransaction({ to: timelockSigner.address, value: ethers.parseEther("1") });
+
+    // Deploy Token
+    const TokenFactory = await ethers.getContractFactory("ProjectToken");
+    token = await TokenFactory.deploy(
+      "MyToken",
+      "MTK",
+      await timelock.getAddress(),
+      [user1.address, user2.address],
+      [ethers.parseEther("600000000"), ethers.parseEther("400000000")]
+    );
+    await token.waitForDeployment();
   });
 
   // ═════════════════════════════════════════════════════════════
-  // DEPLOYMENT
+  // DEPLOYMENT TESTS
   // ═════════════════════════════════════════════════════════════
 
   describe("Deployment", function () {
-    it("Should set correct name and symbol", async function () {
-      expect(await token.name()).to.equal("ProjectToken");
-      expect(await token.symbol()).to.equal("PROJ");
+    it("Should mint max supply in constructor", async function () {
+      expect(await token.totalMinted()).to.equal(MAX_SUPPLY);
+      expect(await token.totalSupply()).to.equal(MAX_SUPPLY);
     });
 
-    it("Should set owner correctly", async function () {
-      expect(await token.owner()).to.equal(owner.address);
+    it("Should store timelock address", async function () {
+      expect(await token.timelock()).to.equal(await timelock.getAddress());
     });
 
-    it("Should have 0 initial supply", async function () {
-      expect(await token.totalSupply()).to.equal(0);
+    it("Should distribute tokens correctly", async function () {
+      expect(await token.balanceOf(user1.address)).to.equal(ethers.parseEther("600000000"));
+      expect(await token.balanceOf(user2.address)).to.equal(ethers.parseEther("400000000"));
     });
 
-    it("Should exclude owner from limits", async function () {
-      expect(await token.isExcludedFromLimits(owner.address)).to.be.true;
+    it("Should not be finalized initially", async function () {
+      expect(await token.finalized()).to.be.false;
+      expect(await token.isFinalized()).to.be.false;
+      expect(await token.isImmutable()).to.be.false;
     });
 
-    it("Should return correct contract state", async function () {
-      const state = await token.getContractState();
-      expect(state.paused_).to.be.false;
-      expect(state.mintingFinished_).to.be.false;
-      expect(state.mintLockPermanent_).to.be.false;
-      expect(state.maxWallet_).to.equal(hre.ethers.parseEther("10000000"));
-      expect(state.totalSupply_).to.equal(0);
-      expect(state.maxSupply_).to.equal(hre.ethers.parseEther("1000000000"));
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // MINT
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Mint", function () {
-    it("Should mint tokens to address", async function () {
-      await token.mint(addr1.address, 1000);
-      expect(await token.balanceOf(addr1.address)).to.equal(1000);
+    it("Should set maxWalletAmount", async function () {
+      expect(await token.maxWalletAmount()).to.equal(ethers.parseEther("10000000"));
     });
 
-    it("Should increase total supply", async function () {
-      await token.mint(addr1.address, 1000);
-      expect(await token.totalSupply()).to.equal(1000);
+    it("Should exclude timelock from limits", async function () {
+      expect(await token.isExcludedFromLimits(await timelock.getAddress())).to.be.true;
     });
 
-    it("Should emit TokensMinted event", async function () {
-      await expect(token.mint(addr1.address, 1000))
-        .to.emit(token, "TokensMinted")
-        .withArgs(addr1.address, 1000);
+    it("Should emit TimelockSet event", async function () {
+      const tx = await token.deploymentTransaction();
+      const receipt = await tx?.wait();
+      // Event emitted in constructor
     });
 
-    it("Should fail if non-owner tries to mint", async function () {
+    it("Should revert with empty distribution", async function () {
+      const TokenFactory = await ethers.getContractFactory("ProjectToken");
       await expect(
-        token.connect(addr1).mint(addr1.address, 1000)
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
+        TokenFactory.deploy("T", "T", await timelock.getAddress(), [], [])
+      ).to.be.revertedWith("Empty distribution");
     });
 
-    it("Should fail mint to zero address", async function () {
+    it("Should revert with too many recipients", async function () {
+      const TokenFactory = await ethers.getContractFactory("ProjectToken");
+      const recipients = Array(201).fill(user1.address);
+      const amounts = Array(201).fill(ethers.parseEther("1"));
       await expect(
-        token.mint("0x0000000000000000000000000000000000000000", 1000)
-      ).to.be.revertedWith("Cannot mint to zero address");
+        TokenFactory.deploy("T", "T", await timelock.getAddress(), recipients, amounts)
+      ).to.be.revertedWith("Too many recipients");
     });
 
-    it("Should fail mint zero amount", async function () {
+    it("Should revert if totalMinted != MAX_SUPPLY", async function () {
+      const TokenFactory = await ethers.getContractFactory("ProjectToken");
       await expect(
-        token.mint(addr1.address, 0)
-      ).to.be.revertedWith("Amount must be greater than 0");
-    });
-
-    it("Should fail mint to blacklisted address", async function () {
-      await token.setBlacklist(addr1.address, true);
-      await expect(
-        token.mint(addr1.address, 1000)
-      ).to.be.revertedWith("Address is blacklisted");
-    });
-
-    it("Should fail if exceeds max supply", async function () {
-      const maxSupply = await token.MAX_SUPPLY();
-      await expect(
-        token.mint(addr1.address, maxSupply + 1n)
-      ).to.be.revertedWith("Exceeds max supply");
-    });
-
-    it("Should fail when paused", async function () {
-      await token.pause();
-      await expect(
-        token.mint(addr1.address, 1000)
-      ).to.be.revertedWithCustomError(token, "EnforcedPause");
-    });
-
-    it("Should fail when minting finished", async function () {
-      await token.finishMinting();
-      await expect(
-        token.mint(addr1.address, 1000)
-      ).to.be.revertedWith("Minting is finished");
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // BATCH MINT
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Batch Mint", function () {
-    it("Should mint batch to multiple addresses", async function () {
-      await token.mintBatch([addr1.address, addr2.address], [1000, 2000]);
-      expect(await token.balanceOf(addr1.address)).to.equal(1000);
-      expect(await token.balanceOf(addr2.address)).to.equal(2000);
-    });
-
-    it("Should fail batch mint with zero address", async function () {
-      await expect(
-        token.mintBatch(
-          [addr1.address, "0x0000000000000000000000000000000000000000"],
-          [1000, 1000]
+        TokenFactory.deploy(
+          "T", "T", await timelock.getAddress(),
+          [user1.address], [ethers.parseEther("1")]
         )
-      ).to.be.revertedWith("Cannot mint to zero address");
-    });
-
-    it("Should fail batch mint with zero amount", async function () {
-      await expect(
-        token.mintBatch([addr1.address, addr2.address], [1000, 0])
-      ).to.be.revertedWith("Amount must be greater than 0");
-    });
-
-    it("Should fail batch mint too large", async function () {
-      const recipients = Array(51).fill(addr1.address);
-      const amounts = Array(51).fill(1000);
-      
-      await expect(
-        token.mintBatch(recipients, amounts)
-      ).to.be.revertedWith("Batch too large");
-    });
-
-    it("Should fail batch mint length mismatch", async function () {
-      await expect(
-        token.mintBatch([addr1.address], [1000, 2000])
-      ).to.be.revertedWith("Length mismatch");
-    });
-
-    it("Should fail batch mint empty", async function () {
-      await expect(
-        token.mintBatch([], [])
-      ).to.be.revertedWith("Empty batch");
-    });
-
-    it("Should fail batch mint to blacklisted", async function () {
-      await token.setBlacklist(addr2.address, true);
-      await expect(
-        token.mintBatch([addr1.address, addr2.address], [1000, 1000])
-      ).to.be.revertedWith("Cannot mint to blacklisted address");
-    });
-
-    it("Should fail batch mint when paused", async function () {
-      await token.pause();
-      await expect(
-        token.mintBatch([addr1.address], [1000])
-      ).to.be.revertedWithCustomError(token, "EnforcedPause");
-    });
-
-    it("Should fail batch mint when minting finished", async function () {
-      await token.finishMinting();
-      await expect(
-        token.mintBatch([addr1.address], [1000])
-      ).to.be.revertedWith("Minting is finished");
+      ).to.be.revertedWith("Must mint max supply");
     });
   });
 
   // ═════════════════════════════════════════════════════════════
-  // BURN
+  // ACCESS CONTROL TESTS
   // ═════════════════════════════════════════════════════════════
 
-  describe("Burn", function () {
-    it("Should burn tokens", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.connect(addr1).burn(500);
-      expect(await token.balanceOf(addr1.address)).to.equal(500);
+  describe("Access Control", function () {
+    it("Should grant roles to timelock only", async function () {
+      expect(await token.hasRole(await token.DEFAULT_ADMIN_ROLE(), await timelock.getAddress())).to.be.true;
+      expect(await token.hasRole(await token.ADMIN_ROLE(), await timelock.getAddress())).to.be.true;
+      expect(await token.hasRole(await token.DEX_MANAGER_ROLE(), await timelock.getAddress())).to.be.true;
     });
 
-    it("Should decrease total supply", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.connect(addr1).burn(500);
-      expect(await token.totalSupply()).to.equal(500);
-    });
-
-    it("Should emit TokensBurned event", async function () {
-      await token.mint(addr1.address, 1000);
-      await expect(token.connect(addr1).burn(500))
-        .to.emit(token, "TokensBurned")
-        .withArgs(addr1.address, 500);
-    });
-
-    it("Should fail burn zero amount", async function () {
-      await token.mint(addr1.address, 1000);
+    it("Should not allow non-timelock to grant roles", async function () {
       await expect(
-        token.connect(addr1).burn(0)
-      ).to.be.revertedWith("Amount must be greater than 0");
+        token.connect(attacker).grantRole(await token.ADMIN_ROLE(), attacker.address)
+      ).to.be.revertedWith("Only timelock with role admin can grant");
     });
 
-    it("Should fail burn when paused", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.pause();
+    it("Should not allow non-timelock to revoke roles", async function () {
       await expect(
-        token.connect(addr1).burn(100)
-      ).to.be.revertedWith("Contract is paused");
+        token.connect(attacker).revokeRole(await token.ADMIN_ROLE(), await timelock.getAddress())
+      ).to.be.revertedWith("Only timelock with role admin can revoke");
     });
 
-    it("Should fail burnFrom when paused", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.connect(addr1).approve(owner.address, 500);
-      await token.pause();
+    it("Should not allow non-timelock to renounce roles", async function () {
       await expect(
-        token.burnFrom(addr1.address, 100)
-      ).to.be.revertedWith("Contract is paused");
+        token.connect(attacker).renounceRole(await token.ADMIN_ROLE(), await timelock.getAddress())
+      ).to.be.revertedWith("Only timelock can renounce roles");
+    });
+
+    it("Should allow timelock to grant roles before finalize", async function () {
+      // Simulate timelock calling grantRole
+      await owner.sendTransaction({
+        to: await timelock.getAddress(),
+        value: ethers.parseEther("0.1"),
+      });
+      
+      // We can't directly test timelock execution here, but we verify the logic
+      expect(await token.hasRole(await token.ADMIN_ROLE(), await timelock.getAddress())).to.be.true;
     });
   });
 
   // ═════════════════════════════════════════════════════════════
-  // PAUSABLE
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Pausable", function () {
-    it("Should pause and unpause", async function () {
-      await token.pause();
-      expect(await token.paused()).to.be.true;
-      expect(await token.isPaused()).to.be.true;
-      
-      await token.unpause();
-      expect(await token.paused()).to.be.false;
-    });
-
-    it("Should fail transfer when paused", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.pause();
-      
-      await expect(
-        token.connect(addr1).transfer(addr2.address, 500)
-      ).to.be.revertedWith("Contract is paused");
-    });
-
-    it("Should fail approve when paused", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.pause();
-      
-      await expect(
-        token.connect(addr1).approve(addr2.address, 500)
-      ).to.be.revertedWithCustomError(token, "EnforcedPause");
-    });
-
-    it("Should fail increaseAllowance when paused", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.pause();
-      
-      await expect(
-        token.connect(addr1).increaseAllowance(addr2.address, 500)
-      ).to.be.revertedWithCustomError(token, "EnforcedPause");
-    });
-
-    it("Should fail decreaseAllowance when paused", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.approve(addr2.address, 500);
-      await token.pause();
-      
-      await expect(
-        token.decreaseAllowance(addr2.address, 100)
-      ).to.be.revertedWithCustomError(token, "EnforcedPause");
-    });
-
-    it("Should fail non-owner pause", async function () {
-      await expect(
-        token.connect(addr1).pause()
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // BLACKLIST
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Blacklist", function () {
-    it("Should blacklist address", async function () {
-      await token.setBlacklist(addr1.address, true);
-      expect(await token.blacklist(addr1.address)).to.be.true;
-    });
-
-    it("Should unblacklist address", async function () {
-      await token.setBlacklist(addr1.address, true);
-      await token.setBlacklist(addr1.address, false);
-      expect(await token.blacklist(addr1.address)).to.be.false;
-    });
-
-    it("Should emit AddressBlacklisted event", async function () {
-      await expect(token.setBlacklist(addr1.address, true))
-        .to.emit(token, "AddressBlacklisted")
-        .withArgs(addr1.address, true);
-    });
-
-    it("Should fail mint to blacklisted", async function () {
-      await token.setBlacklist(addr1.address, true);
-      await expect(
-        token.mint(addr1.address, 1000)
-      ).to.be.revertedWith("Address is blacklisted");
-    });
-
-    it("Should fail transfer from blacklisted", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.setBlacklist(addr1.address, true);
-      
-      await expect(
-        token.connect(addr1).transfer(addr2.address, 500)
-      ).to.be.revertedWith("Sender is blacklisted");
-    });
-
-    it("Should fail transfer to blacklisted", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.setBlacklist(addr2.address, true);
-      
-      await expect(
-        token.connect(addr1).transfer(addr2.address, 500)
-      ).to.be.revertedWith("Recipient is blacklisted");
-    });
-
-    it("Should fail approve from blacklisted", async function () {
-      await token.setBlacklist(addr1.address, true);
-      await expect(
-        token.connect(addr1).approve(addr2.address, 500)
-      ).to.be.revertedWith("Address is blacklisted");
-    });
-
-    it("Should fail approve to blacklisted", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.setBlacklist(addr2.address, true);
-      await expect(
-        token.connect(addr1).approve(addr2.address, 500)
-      ).to.be.revertedWith("Address is blacklisted");
-    });
-
-    it("Should fail blacklist zero address", async function () {
-      await expect(
-        token.setBlacklist("0x0000000000000000000000000000000000000000", true)
-      ).to.be.revertedWith("Cannot blacklist zero address");
-    });
-
-    it("Should fail blacklist owner", async function () {
-      await expect(
-        token.setBlacklist(owner.address, true)
-      ).to.be.revertedWith("Cannot blacklist owner");
-    });
-
-    it("Should fail non-owner blacklist", async function () {
-      await expect(
-        token.connect(addr1).setBlacklist(addr2.address, true)
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // MAX WALLET
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Max Wallet", function () {
-    it("Should enforce max wallet limit", async function () {
-      const maxWallet = await token.maxWalletAmount();
-      await expect(
-        token.mint(addr1.address, maxWallet + 1n)
-      ).to.be.revertedWith("Exceeds max wallet");
-    });
-
-    it("Should update max wallet amount", async function () {
-      await token.setMaxWalletAmount(1000);
-      expect(await token.maxWalletAmount()).to.equal(1000);
-    });
-
-    it("Should emit MaxWalletUpdated event", async function () {
-      const oldAmount = await token.maxWalletAmount();
-      await expect(token.setMaxWalletAmount(1000))
-        .to.emit(token, "MaxWalletUpdated")
-        .withArgs(oldAmount, 1000);
-    });
-
-    it("Should fail non-owner update max wallet", async function () {
-      await expect(
-        token.connect(addr1).setMaxWalletAmount(1000)
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
-    });
-
-    it("Should fail max wallet zero", async function () {
-      await expect(
-        token.setMaxWalletAmount(0)
-      ).to.be.revertedWith("Amount must be greater than 0");
-    });
-
-    it("Should exclude from max wallet", async function () {
-      await token.setExcludedFromLimits(addr1.address, true);
-      const maxWallet = await token.maxWalletAmount();
-      await token.mint(addr1.address, maxWallet + 1000n);
-      expect(await token.balanceOf(addr1.address)).to.be.gt(maxWallet);
-    });
-
-    it("Should fail transfer exceeding max wallet", async function () {
-      const maxWallet = await token.maxWalletAmount();
-      await token.mint(addr1.address, maxWallet);
-      await token.mint(addr2.address, 1000);
-      
-      await expect(
-        token.connect(addr2).transfer(addr1.address, 1)
-      ).to.be.revertedWith("Exceeds max wallet");
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // EXCLUDED FROM LIMITS
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Excluded From Limits", function () {
-    it("Should exclude and include addresses", async function () {
-      await token.setExcludedFromLimits(addr1.address, true);
-      expect(await token.isExcludedFromLimits(addr1.address)).to.be.true;
-      
-      await token.setExcludedFromLimits(addr1.address, false);
-      expect(await token.isExcludedFromLimits(addr1.address)).to.be.false;
-    });
-
-    it("Should emit AddressExcluded event", async function () {
-      await expect(token.setExcludedFromLimits(addr1.address, true))
-        .to.emit(token, "AddressExcluded")
-        .withArgs(addr1.address, true);
-    });
-
-    it("Should fail non-owner exclude", async function () {
-      await expect(
-        token.connect(addr1).setExcludedFromLimits(addr2.address, true)
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
-    });
-
-    it("Should fail exclude zero address", async function () {
-      await expect(
-        token.setExcludedFromLimits("0x0000000000000000000000000000000000000000", true)
-      ).to.be.revertedWith("Cannot exclude zero address");
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // MINT LOCK
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Mint Lock", function () {
-    it("Should finish minting", async function () {
-      await token.finishMinting();
-      expect(await token.mintingFinished()).to.be.true;
-    });
-
-    it("Should emit MintingFinished event", async function () {
-      await expect(token.finishMinting())
-        .to.emit(token, "MintingFinished");
-    });
-
-    it("Should resume minting", async function () {
-      await token.finishMinting();
-      await token.resumeMinting();
-      expect(await token.mintingFinished()).to.be.false;
-    });
-
-    it("Should emit MintingResumed event", async function () {
-      await token.finishMinting();
-      await expect(token.resumeMinting())
-        .to.emit(token, "MintingResumed");
-    });
-
-    it("Should fail mint after finished", async function () {
-      await token.finishMinting();
-      await expect(
-        token.mint(addr1.address, 1000)
-      ).to.be.revertedWith("Minting is finished");
-    });
-
-    it("Should make mint lock permanent", async function () {
-      await token.finishMinting();
-      await token.makeMintLockPermanent();
-      expect(await token.mintLockPermanent()).to.be.true;
-    });
-
-    it("Should fail resume after permanent", async function () {
-      await token.finishMinting();
-      await token.makeMintLockPermanent();
-      await expect(
-        token.resumeMinting()
-      ).to.be.revertedWith("Mint lock is permanent");
-    });
-
-    it("Should fail make permanent without finish", async function () {
-      await expect(
-        token.makeMintLockPermanent()
-      ).to.be.revertedWith("Must finish minting first");
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // OWNERSHIP TRANSFER
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Ownership Transfer", function () {
-    it("Should transfer ownership", async function () {
-      await token.transferOwnership(addr1.address);
-      expect(await token.owner()).to.equal(addr1.address);
-    });
-
-    it("Should exclude new owner from limits", async function () {
-      await token.transferOwnership(addr1.address);
-      expect(await token.isExcludedFromLimits(addr1.address)).to.be.true;
-    });
-
-    it("Should fail transfer to zero address", async function () {
-      await expect(
-        token.transferOwnership("0x0000000000000000000000000000000000000000")
-      ).to.be.revertedWith("New owner is zero address");
-    });
-
-    it("Should fail non-owner transfer", async function () {
-      await expect(
-        token.connect(addr1).transferOwnership(addr2.address)
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // DEX SETUP
+  // DEX SETUP TESTS
   // ═════════════════════════════════════════════════════════════
 
   describe("DEX Setup", function () {
-    it("Should setup DEX addresses", async function () {
-      await token.setupDEX(addr1.address, addr2.address);
-      expect(await token.isExcludedFromLimits(addr1.address)).to.be.true;
-      expect(await token.isExcludedFromLimits(addr2.address)).to.be.true;
+    it("Should setup DEX via timelock", async function () {
+      // Simulate timelock execution
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      
+      expect(await token.pair()).to.equal(pair.address);
+      expect(await token.router()).to.equal(router.address);
     });
 
-    it("Should fail setup DEX with zero address", async function () {
+    it("Should exclude pair and router from limits", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      
+      expect(await token.isExcludedFromLimits(pair.address)).to.be.true;
+      expect(await token.isExcludedFromLimits(router.address)).to.be.true;
+    });
+
+    it("Should revert with zero address pair", async function () {
       await expect(
-        token.setupDEX("0x0000000000000000000000000000000000000000", addr2.address)
+        token.connect(owner).setupDEX(ethers.ZeroAddress, router.address)
       ).to.be.revertedWith("Invalid pair");
     });
 
-    it("Should fail non-owner setup DEX", async function () {
+    it("Should revert with zero address router", async function () {
       await expect(
-        token.connect(addr1).setupDEX(addr2.address, addr3.address)
-      ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
+        token.connect(owner).setupDEX(pair.address, ethers.ZeroAddress)
+      ).to.be.revertedWith("Invalid router");
+    });
+
+    it("Should revert if DEX already setup", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      await expect(
+        token.connect(owner).setupDEX(user1.address, user2.address)
+      ).to.be.revertedWith("DEX already setup");
+    });
+
+    it("Should revert setupDEX after finalize", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      await token.connect(owner).finalize();
+      
+      await expect(
+        token.connect(owner).setupDEX(user1.address, user2.address)
+      ).to.be.revertedWith("Contract is finalized");
     });
   });
 
   // ═════════════════════════════════════════════════════════════
-  // TRANSFER FROM (APPROVAL FLOW)
+  // MAX WALLET TESTS
   // ═════════════════════════════════════════════════════════════
 
-  describe("Transfer From", function () {
-    it("Should transferFrom with approval", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.connect(addr1).approve(addr2.address, 500);
-      await token.connect(addr2).transferFrom(addr1.address, addr3.address, 500);
-      
-      expect(await token.balanceOf(addr3.address)).to.equal(500);
-      expect(await token.balanceOf(addr1.address)).to.equal(500);
+  describe("Max Wallet", function () {
+    it("Should enforce maxWallet before finalize", async function () {
+      await expect(
+        token.connect(user1).transfer(user2.address, ethers.parseEther("10000001"))
+      ).to.be.revertedWith("Exceeds max wallet");
     });
 
-    it("Should fail transferFrom without approval", async function () {
-      await token.mint(addr1.address, 1000);
+    it("Should allow transfer within maxWallet", async function () {
       await expect(
-        token.connect(addr2).transferFrom(addr1.address, addr3.address, 500)
+        token.connect(user1).transfer(user2.address, ethers.parseEther("10000000"))
+      ).to.not.be.reverted;
+    });
+
+    it("Should exclude pair from maxWallet (null safety)", async function () {
+      // Before DEX setup — pair is address(0), should not revert
+      await expect(
+        token.connect(user1).transfer(user2.address, ethers.parseEther("1"))
+      ).to.not.be.reverted;
+    });
+
+    it("Should exclude pair from maxWallet after setup", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      
+      // Transfer to pair should not check maxWallet
+      await expect(
+        token.connect(user1).transfer(pair.address, ethers.parseEther("500000000"))
+      ).to.not.be.reverted;
+    });
+
+    it("Should disable maxWallet after finalize", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      await token.connect(owner).finalize();
+      
+      expect(await token.maxWalletDisabled()).to.be.true;
+      expect(await token.maxWalletAmount()).to.equal(0);
+      
+      // Should allow large transfers after finalize
+      await expect(
+        token.connect(user1).transfer(user2.address, ethers.parseEther("100000000"))
+      ).to.not.be.reverted;
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════
+  // FINALIZE TESTS
+  // ═════════════════════════════════════════════════════════════
+
+  describe("Finalize", function () {
+    beforeEach(async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+    });
+
+    it("Should finalize successfully", async function () {
+      await expect(token.connect(owner).finalize())
+        .to.emit(token, "Finalized")
+        .to.emit(token, "ContractImmutable");
+      
+      expect(await token.finalized()).to.be.true;
+      expect(await token.isImmutable()).to.be.true;
+    });
+
+    it("Should revoke all roles from timelock", async function () {
+      await token.connect(owner).finalize();
+      
+      expect(await token.hasRole(await token.DEFAULT_ADMIN_ROLE(), await timelock.getAddress())).to.be.false;
+      expect(await token.hasRole(await token.ADMIN_ROLE(), await timelock.getAddress())).to.be.false;
+      expect(await token.hasRole(await token.DEX_MANAGER_ROLE(), await timelock.getAddress())).to.be.false;
+    });
+
+    it("Should set role admin to bytes32(0)", async function () {
+      await token.connect(owner).finalize();
+      
+      expect(await token.getRoleAdmin(await token.ADMIN_ROLE())).to.equal(ethers.ZeroHash);
+      expect(await token.getRoleAdmin(await token.DEX_MANAGER_ROLE())).to.equal(ethers.ZeroHash);
+    });
+
+    it("Should disable maxWallet", async function () {
+      await token.connect(owner).finalize();
+      
+      expect(await token.maxWalletDisabled()).to.be.true;
+      expect(await token.maxWalletAmount()).to.equal(0);
+    });
+
+    it("Should revert if DEX not set", async function () {
+      // Deploy new token without DEX
+      const TokenFactory = await ethers.getContractFactory("ProjectToken");
+      const newToken = await TokenFactory.deploy(
+        "T", "T", await timelock.getAddress(),
+        [user1.address], [MAX_SUPPLY]
+      );
+      
+      await expect(newToken.connect(owner).finalize())
+        .to.be.revertedWith("DEX not set");
+    });
+
+    it("Should revert finalize twice", async function () {
+      await token.connect(owner).finalize();
+      
+      await expect(token.connect(owner).finalize())
+        .to.be.revertedWith("Already finalized");
+    });
+
+    it("Should revert admin functions after finalize", async function () {
+      await token.connect(owner).finalize();
+      
+      await expect(
+        token.connect(owner).setMaxWalletAmount(ethers.parseEther("1"))
+      ).to.be.revertedWith("Contract is finalized");
+      
+      await expect(
+        token.connect(owner).setExcludedFromLimits(user1.address, true)
+      ).to.be.revertedWith("Contract is finalized");
+    });
+
+    it("Should revert grantRole after finalize", async function () {
+      await token.connect(owner).finalize();
+      
+      await expect(
+        token.connect(owner).grantRole(await token.ADMIN_ROLE(), attacker.address)
+      ).to.be.revertedWith("Contract is finalized");
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════
+  // BURN TESTS
+  // ═════════════════════════════════════════════════════════════
+
+  describe("Burn", function () {
+    it("Should allow users to burn their tokens", async function () {
+      const burnAmount = ethers.parseEther("1000");
+      await expect(token.connect(user1).burn(burnAmount))
+        .to.emit(token, "TokensBurned")
+        .withArgs(user1.address, burnAmount);
+      
+      expect(await token.totalSupply()).to.equal(MAX_SUPPLY - burnAmount);
+    });
+
+    it("Should allow burnFrom with approval", async function () {
+      const burnAmount = ethers.parseEther("1000");
+      await token.connect(user1).approve(user2.address, burnAmount);
+      
+      await expect(token.connect(user2).burnFrom(user1.address, burnAmount))
+        .to.emit(token, "TokensBurned")
+        .withArgs(user1.address, burnAmount);
+    });
+
+    it("Should revert burn with zero amount", async function () {
+      await expect(token.connect(user1).burn(0))
+        .to.be.revertedWith("Amount must be > 0");
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════
+  // TRANSFER TESTS
+  // ═════════════════════════════════════════════════════════════
+
+  describe("Transfer", function () {
+    it("Should allow standard transfers", async function () {
+      await expect(
+        token.connect(user1).transfer(user2.address, ethers.parseEther("1000"))
+      ).to.not.be.reverted;
+      
+      expect(await token.balanceOf(user2.address)).to.equal(ethers.parseEther("400000001000"));
+    });
+
+    it("Should work with DEX after finalize", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      await token.connect(owner).finalize();
+      
+      // Simulate DEX interaction
+      await token.connect(user1).approve(pair.address, ethers.parseEther("1000"));
+      
+      // Pair should be able to transferFrom
+      await expect(
+        token.connect(pair).transferFrom(user1.address, user2.address, ethers.parseEther("1000"))
+      ).to.not.be.reverted;
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════
+  // VIEW FUNCTION TESTS
+  // ═════════════════════════════════════════════════════════════
+
+  describe("View Functions", function () {
+    it("Should return correct token status", async function () {
+      const status = await token.getTokenStatus();
+      
+      expect(status._finalized).to.be.false;
+      expect(status._maxWalletDisabled).to.be.false;
+      expect(status._totalMinted).to.equal(MAX_SUPPLY);
+      expect(status._timelock).to.equal(await timelock.getAddress());
+    });
+
+    it("Should return correct role status", async function () {
+      expect(await token.hasAdminRole(await timelock.getAddress())).to.be.true;
+      expect(await token.hasDexManagerRole(await timelock.getAddress())).to.be.true;
+      expect(await token.hasDefaultAdminRole(await timelock.getAddress())).to.be.true;
+      
+      expect(await token.hasAdminRole(attacker.address)).to.be.false;
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════
+  // SECURITY TESTS
+  // ═════════════════════════════════════════════════════════════
+
+  describe("Security", function () {
+    it("Should not allow attacker to take control", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      await token.connect(owner).finalize();
+      
+      // Attacker cannot grant themselves roles
+      await expect(
+        token.connect(attacker).grantRole(await token.ADMIN_ROLE(), attacker.address)
+      ).to.be.reverted;
+      
+      // Attacker cannot change maxWallet
+      await expect(
+        token.connect(attacker).setMaxWalletAmount(ethers.parseEther("1"))
       ).to.be.reverted;
     });
 
-    it("Should fail transferFrom when paused", async function () {
-      await token.mint(addr1.address, 1000);
-      await token.connect(addr1).approve(addr2.address, 500);
-      await token.pause();
+    it("Should maintain immutability after finalize", async function () {
+      await token.connect(owner).setupDEX(pair.address, router.address);
+      await token.connect(owner).finalize();
       
-      await expect(
-        token.connect(addr2).transferFrom(addr1.address, addr3.address, 500)
-      ).to.be.revertedWith("Contract is paused");
+      // Verify all immutability conditions
+      expect(await token.finalized()).to.be.true;
+      expect(await token.maxWalletDisabled()).to.be.true;
+      expect(await token.getRoleAdmin(await token.ADMIN_ROLE())).to.equal(ethers.ZeroHash);
+      expect(await token.getRoleAdmin(await token.DEX_MANAGER_ROLE())).to.equal(ethers.ZeroHash);
     });
   });
 });

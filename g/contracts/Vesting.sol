@@ -1,7 +1,4 @@
-
-# Vesting.sol v2 - Trust-Minimized, compatible with Token.sol v7
-
-vesting_v2 = '''// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -464,4 +461,4 @@ contract Vesting is AccessControl, ReentrancyGuard {
             this.isImmutable()
         );
     }
-}'''
+}
