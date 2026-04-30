@@ -150,18 +150,19 @@ contract Vesting is AccessControl, ReentrancyGuard {
             return 0;
         }
 
-        uint256 elapsed = block.timestamp - s.startTime;
+        uint256 currentTime = block.timestamp;
+        uint256 elapsed = currentTime - s.startTime;
 
         if (elapsed < CLIFF) return 0;
 
         if (elapsed >= VESTING_DURATION) {
-            return s.totalAmount - s.releasedAmount;
+            return s.vestingAmount - s.releasedAmount;
         }
 
         uint256 vestedTime = elapsed - CLIFF;
         uint256 vestingTime = VESTING_DURATION - CLIFF;
 
-        uint256 vested = (s.totalAmount * vestedTime) / vestingTime;
+        uint256 vested = (s.vestingAmount * vestedTime) / vestingTime;
 
         if (vested <= s.releasedAmount) return 0;
 
@@ -181,37 +182,41 @@ contract Vesting is AccessControl, ReentrancyGuard {
         if (elapsed < CLIFF) return 0;
 
         if (elapsed >= VESTING_DURATION) {
-            return s.totalAmount;
+            return s.vestingAmount;
         }
 
         uint256 vestedTime = elapsed - CLIFF;
         uint256 vestingTime = VESTING_DURATION - CLIFF;
 
-        return (s.totalAmount * vestedTime) / vestingTime;
+        return (s.vestingAmount * vestedTime) / vestingTime;
     }
 
     function release() external nonReentrant {
         VestingSchedule storage s = vestingSchedules[msg.sender];
         require(s.initialized, "No vesting found");
 
-        uint256 amount = releasableAmount(msg.sender);
-        require(amount > 0, "Nothing to release");
+        uint256 amount = releasableAmount(user);
+        if (amount > 0) {
 
-        require(
-        token.balanceOf(address(this)) >= amount,
-        "Insufficient contract balance"
-        );
+        if (token.balanceOf(address(this)) < amount) {
+        emit ReleaseFailed(user, amount);
+        continue;
+        }
+
+        bool ok = token.transfer(user, amount);
+        if (!ok) {
+        emit ReleaseFailed(user, amount);
+        continue;
+        }
 
         s.releasedAmount += amount;
         totalReleased += amount;
 
-        require(token.transfer(msg.sender, amount), "Transfer failed");
+        emit TokensReleased(user, amount, block.timestamp);
 
-        emit TokensReleased(msg.sender, amount, block.timestamp);
-
-        if (s.releasedAmount == s.totalAmount) {
-            emit VestingCompleted(msg.sender);
-        }
+        if (s.releasedAmount == s.vestingAmount) {
+        emit VestingCompleted(user);
+    }
     }
 
     function releaseBatch(address[] calldata users) external nonReentrant {
@@ -228,10 +233,10 @@ contract Vesting is AccessControl, ReentrancyGuard {
             if (s.initialized) {
                 uint256 amount = releasableAmount(user);
                 if (amount > 0) {
-                    require(
-                        token.balanceOf(address(this)) >= amount,
-                        "Insufficient contract balance"
-                    );
+                    if (token.balanceOf(address(this)) < amount) {
+                        emit ReleaseFailed(user, amount);
+                        continue;
+                    }
 
                     bool ok = token.transfer(user, amount);
                     if (!ok) {
@@ -244,7 +249,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
                     emit TokensReleased(user, amount, block.timestamp);
 
-                    if (s.releasedAmount == s.totalAmount) {
+                    if (s.releasedAmount == s.vestingAmount) {
                         emit VestingCompleted(user);
                     }
                 }
@@ -294,10 +299,10 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
         uint256 _releasable = releasableAmount(beneficiary);
         uint256 _vested = vestedAmount(beneficiary);
-        bool _isComplete = s.releasedAmount == s.totalAmount;
+        bool _isComplete = s.releasedAmount == s.vestingAmount;
 
         return (
-            s.totalAmount,
+            s.vestingAmount,
             s.releasedAmount,
             _releasable,
             _vested,
@@ -325,7 +330,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
     function isVestingComplete(address beneficiary) external view returns (bool) {
         VestingSchedule storage s = vestingSchedules[beneficiary];
         if (!s.initialized) return false;
-        return s.releasedAmount == s.totalAmount;
+        return s.releasedAmount == s.vestingAmount;
     }
 
     function timeRemaining(address beneficiary) external view returns (uint256) {
