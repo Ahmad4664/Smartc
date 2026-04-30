@@ -1,33 +1,44 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// ✅ OpenZeppelin v5 imports (نفس المسارات لكن تأكد أنك مثبت v5)
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
-    
+/**
+ * @title ProjectToken
+ * @notice ERC20 token with vesting integration, max wallet limits, and automatic decentralization
+ * @dev Compatible with Vesting.sol - uses same governance pattern
+ */
+contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
+
+    // ============ Constants ============
     uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10**18;
     uint256 public constant MAX_RECIPIENTS = 200;
+    uint256 public constant GOVERNANCE_PERIOD = 180 days; // 6 months
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant DEX_MANAGER_ROLE = keccak256("DEX_MANAGER_ROLE");
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
+    // ============ Immutable ============
     address public immutable timelock;
+    uint64 public immutable deployedAt;
 
+    // ============ State ============
     bool public finalized;
     bool public maxWalletDisabled;
 
     uint256 public maxWalletAmount;
+    uint256 public totalMinted;
 
     address public pair;
     address public router;
 
-    uint256 public totalMinted;
-
     mapping(address => bool) public isExcludedFromLimits;
 
+    // ============ Events ============
     event TokensMinted(address indexed to, uint256 amount);
     event TokensBurned(address indexed from, uint256 amount);
     event AddressExcluded(address indexed account, bool isExcluded);
@@ -38,12 +49,16 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
     event ContractImmutable();
     event RoleRevoked(bytes32 indexed role, address indexed account);
     event TimelockSet(address indexed timelock);
+    event GovernanceExpired(uint64 expiryTime);
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
+    // ============ Modifiers ============
     modifier onlyBeforeFinalize() {
         require(!finalized, "Contract is finalized");
         _;
     }
 
+    // ============ Constructor ============
     constructor(
         string memory name,
         string memory symbol,
@@ -57,6 +72,8 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         require(initialRecipients.length <= MAX_RECIPIENTS, "Too many recipients");
 
         timelock = _timelock;
+        deployedAt = uint64(block.timestamp);
+
         emit TimelockSet(_timelock);
 
         _grantRole(DEFAULT_ADMIN_ROLE, _timelock);
@@ -71,7 +88,6 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
             require(amount > 0, "Amount must be > 0");
 
             totalMinted += amount;
-
             _mint(to, amount);
             emit TokensMinted(to, amount);
         }
@@ -85,32 +101,58 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         emit AddressExcluded(_timelock, true);
     }
 
-    function grantRole(bytes32 role, address account) public override onlyBeforeFinalize {
+    // ============ Governance Check ============
+    function _checkGovernance() internal view {
+        if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
+            revert("Governance expired");
+        }
+    }
+
+    // ============ Role Control (Governance expires automatically) ============
+    function grantRole(bytes32 role, address account)
+        public
+        override
+        onlyBeforeFinalize
+    {
+        _checkGovernance();
         require(
             hasRole(getRoleAdmin(role), msg.sender) && msg.sender == timelock,
-            "Only timelock with role admin can grant"
+            "Only timelock with role admin"
         );
         super.grantRole(role, account);
     }
 
-    function revokeRole(bytes32 role, address account) public override onlyBeforeFinalize {
+    function revokeRole(bytes32 role, address account)
+        public
+        override
+        onlyBeforeFinalize
+    {
+        _checkGovernance();
         require(
             hasRole(getRoleAdmin(role), msg.sender) && msg.sender == timelock,
-            "Only timelock with role admin can revoke"
+            "Only timelock with role admin"
         );
         super.revokeRole(role, account);
     }
 
-    function renounceRole(bytes32 role, address callerAccount) public override onlyBeforeFinalize {
-        require(msg.sender == timelock, "Only timelock can renounce roles");
+    function renounceRole(bytes32 role, address callerAccount)
+        public
+        override
+        onlyBeforeFinalize
+    {
+        _checkGovernance();
+        require(msg.sender == timelock, "Only timelock can renounce");
         super.renounceRole(role, callerAccount);
     }
 
-    function setupDEX(address _pair, address _router) 
-        external 
-        onlyRole(DEX_MANAGER_ROLE) 
-        onlyBeforeFinalize 
+    // ============ DEX Setup ============
+    function setupDEX(address _pair, address _router)
+        external
+        onlyRole(DEX_MANAGER_ROLE)
+        onlyBeforeFinalize
     {
+        _checkGovernance();
+
         require(_pair != address(0), "Invalid pair");
         require(_router != address(0), "Invalid router");
         require(_pair.code.length > 0, "Pair must be contract");
@@ -129,11 +171,13 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         emit AddressExcluded(_router, true);
     }
 
-    function setMaxWalletAmount(uint256 newAmount) 
-        external 
-        onlyRole(ADMIN_ROLE) 
-        onlyBeforeFinalize 
+    // ============ Max Wallet ============
+    function setMaxWalletAmount(uint256 newAmount)
+        external
+        onlyRole(ADMIN_ROLE)
+        onlyBeforeFinalize
     {
+        _checkGovernance();
         require(newAmount > 0, "Amount must be > 0");
         require(newAmount <= MAX_SUPPLY, "Exceeds max supply");
 
@@ -143,30 +187,63 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         emit MaxWalletUpdated(oldAmount, newAmount);
     }
 
-    function setExcludedFromLimits(address account, bool excluded) 
-        external 
-        onlyRole(ADMIN_ROLE) 
-        onlyBeforeFinalize 
+    function setExcludedFromLimits(address account, bool excluded)
+        external
+        onlyRole(ADMIN_ROLE)
+        onlyBeforeFinalize
     {
+        _checkGovernance();
         require(account != address(0), "Cannot exclude zero");
         isExcludedFromLimits[account] = excluded;
         emit AddressExcluded(account, excluded);
     }
 
-    function finalize() 
-        external 
-        onlyRole(ADMIN_ROLE) 
-        onlyBeforeFinalize 
+    // ============ Emergency Rescue ============
+    function rescueTokens(
+        address _token,
+        address to,
+        uint256 amount
+    ) external onlyRole(ADMIN_ROLE) onlyBeforeFinalize nonReentrant {
+        _checkGovernance();
+        require(to != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be > 0");
+
+        // Cannot rescue the token itself if it would break accounting
+        if (_token == address(this)) {
+            uint256 circulating = totalSupply();
+            require(
+                balanceOf(address(this)) >= amount,
+                "Insufficient contract balance"
+            );
+            // Additional check: ensure we don't rescue locked vesting tokens
+            // This is handled by the Vesting contract's own rescue logic
+        }
+
+        IERC20(_token).transfer(to, amount);
+        emit TokensRescued(_token, to, amount);
+    }
+
+    // ============ Single-Path Finalization ============
+    function finalize()
+        external
+        onlyBeforeFinalize
     {
+        // Path 1: Admin finalizes during governance
+        if (block.timestamp < deployedAt + GOVERNANCE_PERIOD) {
+            require(hasRole(ADMIN_ROLE, msg.sender), "Only admin");
+        }
+        // Path 2: Anyone finalizes after governance expires (automatic decentralization)
+
         require(pair != address(0), "DEX not set");
         require(router != address(0), "Router not set");
 
         finalized = true;
-
         maxWalletDisabled = true;
         maxWalletAmount = 0;
+
         emit MaxWalletDisabled();
 
+        // Revoke all roles from timelock
         _revokeRole(DEX_MANAGER_ROLE, timelock);
         _revokeRole(ADMIN_ROLE, timelock);
         _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
@@ -175,14 +252,21 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         emit RoleRevoked(ADMIN_ROLE, timelock);
         emit RoleRevoked(DEFAULT_ADMIN_ROLE, timelock);
 
+        // Disable role administration permanently
         _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
         _setRoleAdmin(ADMIN_ROLE, bytes32(0));
         _setRoleAdmin(DEX_MANAGER_ROLE, bytes32(0));
+        _setRoleAdmin(MINTER_ROLE, bytes32(0));
 
         emit Finalized();
         emit ContractImmutable();
+
+        if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
+            emit GovernanceExpired(uint64(deployedAt + GOVERNANCE_PERIOD));
+        }
     }
 
+    // ============ Burn ============
     function burn(uint256 amount) public override {
         require(amount > 0, "Amount must be > 0");
         super.burn(amount);
@@ -195,19 +279,11 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         emit TokensBurned(account, amount);
     }
 
-    function approve(address spender, uint256 amount)
-        public
-        override
-        returns (bool)
-    {
-        return super.approve(spender, amount);
-    }
-
+    // ============ ERC20 Override ============
     function _update(address from, address to, uint256 amount) internal override {
         if (to != address(0) && !maxWalletDisabled) {
             _checkMaxWalletBefore(to, amount);
         }
-
         super._update(from, to, amount);
     }
 
@@ -219,32 +295,48 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         }
     }
 
+    // ============ View Functions ============
     function isFinalized() external view returns (bool) {
         return finalized;
     }
 
     function isImmutable() external view returns (bool) {
-        return finalized 
-            && maxWalletDisabled 
+        return finalized
+            && maxWalletDisabled
             && getRoleAdmin(ADMIN_ROLE) == bytes32(0)
             && getRoleAdmin(DEX_MANAGER_ROLE) == bytes32(0);
     }
 
-    function getTokenStatus() 
-        external 
-        view 
+    function isGovernanceExpired() external view returns (bool) {
+        return block.timestamp >= deployedAt + GOVERNANCE_PERIOD;
+    }
+
+    function governanceTimeRemaining() external view returns (uint256) {
+        uint256 expiry = deployedAt + GOVERNANCE_PERIOD;
+        if (block.timestamp >= expiry) return 0;
+        return expiry - block.timestamp;
+    }
+
+    function getTokenStatus()
+        external
+        view
         returns (
-            bool,
-            bool,
-            uint256,
-            address,
-            address,
-            uint256,
-            uint256,
-            address,
-            bool
-        ) 
+            bool _finalized,
+            bool _maxWalletDisabled,
+            uint256 _maxWalletAmount,
+            address _pair,
+            address _router,
+            uint256 _totalMinted,
+            uint256 _totalSupply,
+            address _timelock,
+            bool _isImmutable,
+            bool _governanceExpired,
+            uint256 _governanceRemaining
+        )
     {
+        bool govExpired = block.timestamp >= deployedAt + GOVERNANCE_PERIOD;
+        uint256 govRemaining = govExpired ? 0 : (deployedAt + GOVERNANCE_PERIOD) - block.timestamp;
+
         return (
             finalized,
             maxWalletDisabled,
@@ -254,7 +346,9 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
             totalMinted,
             totalSupply(),
             timelock,
-            this.isImmutable()
+            this.isImmutable(),
+            govExpired,
+            govRemaining
         );
     }
 
