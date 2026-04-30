@@ -124,7 +124,6 @@ contract Vesting is AccessControl, ReentrancyGuard {
             immediateAmount: immediateAmount
         });
 
-        assert(beneficiaries.length == 0 || beneficiaries[beneficiaries.length - 1] != beneficiary);
 
         beneficiaries.push(beneficiary);
         totalVested += amount;
@@ -197,6 +196,11 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
         uint256 amount = releasableAmount(msg.sender);
         require(amount > 0, "Nothing to release");
+
+        require(
+        token.balanceOf(address(this)) >= amount,
+        "Insufficient contract balance"
+        );
 
         s.releasedAmount += amount;
         totalReleased += amount;
